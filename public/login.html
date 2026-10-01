@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>登录 / 注册</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #ddd; max-width: 400px; margin: 80px auto; padding: 0 20px; }
+    h1 { color: #55ff55; }
+    input { display: block; width: 100%; margin: 12px 0; padding: 10px; background: #333; color: #ddd; border: 1px solid #555; box-sizing: border-box; }
+    button { width: 100%; padding: 10px; background: #3a5a3a; color: #afa; border: 1px solid #5a8a5a; cursor: pointer; font-size: 16px; margin-top: 8px; }
+    button:hover { background: #4a6a4a; }
+    #msg { margin-top: 12px; color: #ffaa00; min-height: 20px; }
+    a { color: #55ff55; }
+  </style>
+</head>
+<body>
+  <h1>登录 / 注册</h1>
+  <input type="text" id="username" placeholder="用户名" autocomplete="username">
+  <input type="password" id="password" placeholder="密码" autocomplete="current-password">
+  <button id="login">登录</button>
+  <button id="register" style="background:#5a3a3a;border-color:#8a5a5a;">注册（每个 IP 仅一次）</button>
+  <div id="msg"></div>
+  <p><a href="/">返回首页</a></p>
+
+  <script>
+    const msg = document.getElementById('msg');
+
+    async function auth(action) {
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      if (!username || !password) { msg.textContent = '请填写用户名和密码'; return; }
+
+      msg.textContent = '处理中...';
+      try {
+        const res = await fetch(`/api/${action}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '请求失败');
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('username', data.username);
+        location.href = '/';
+      } catch (e) {
+        msg.textContent = e.message;
+      }
+    }
+
+    document.getElementById('login').onclick = () => auth('login');
+    document.getElementById('register').onclick = () => auth('register');
+  </script>
+</body>
+</html>

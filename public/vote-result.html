@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>投票结果</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #ddd; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #55ff55; }
+    .bar-row { margin: 12px 0; }
+    .bar-row .label { display: flex; justify-content: space-between; font-size: 14px; color: #ccc; }
+    .bar-row .rank { color: #ffaa00; margin-right: 8px; }
+    .bar-row .bar { background: #333; height: 24px; margin-top: 4px; position: relative; }
+    .bar-row .bar > div {
+      background: linear-gradient(90deg, #3a5a3a, #55ff55);
+      height: 100%; transition: width .5s;
+    }
+    .bar-row .bar > span {
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+      color: #000; font-weight: bold; font-size: 13px;
+    }
+    a { color: #55ff55; }
+    button { background: #3a5a3a; color: #afa; border: 1px solid #5a8a5a; padding: 8px 16px; cursor: pointer; font-family: monospace; margin-right: 8px; }
+    button:hover { background: #4a6a4a; }
+  </style>
+</head>
+<body>
+  <h1>📊 投票结果</h1>
+  <div id="chart">加载中...</div>
+  <p>
+    <button onclick="location.href='/vote.html'">← 返回投票</button>
+    <a href="/">首页</a>
+  </p>
+
+  <script>
+    const token = localStorage.getItem('token');
+    if (!token) location.href = '/login.html';
+
+    function render(state) {
+      const el = document.getElementById('chart');
+      if (!state.candidates?.length) { el.textContent = '暂无数据'; return; }
+      const max = Math.max(1, ...state.counts);
+      const sorted = state.candidates
+        .map((c, i) => ({ c, v: state.counts[i] || 0 }))
+        .sort((a, b) => b.v - a.v);
+      el.innerHTML = sorted.map((it, idx) => `
+        <div class="bar-row">
+          <div class="label">
+            <span><span class="rank">#${idx+1}</span>${it.c}</span>
+          </div>
+          <div class="bar">
+            <div style="width:${it.v/max*100}%"></div>
+            <span>${it.v} 票</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function load() {
+      const r = await fetch('/api/votes', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.status === 401) { location.href = '/login.html'; return; }
+      render(await r.json());
+    }
+
+    load();
+    setInterval(load, 3000);
+  </script>
+</body>
+</html>

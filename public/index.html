@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MC 工具箱</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #ddd; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #55ff55; }
+    .nav { display: flex; gap: 12px; flex-wrap: wrap; margin: 20px 0; }
+    .nav a { display: inline-block; padding: 10px 16px; background: #2a3a2a; color: #afa; border: 1px solid #4a6a4a; text-decoration: none; }
+    .nav a:hover { background: #3a5a3a; }
+    a { color: #55ff55; }
+    #stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 20px 0; }
+    .stat { background: #222; border: 1px solid #444; padding: 12px; }
+    .stat .name { color: #888; font-size: 12px; }
+    .stat .value { color: #55ff55; font-size: 20px; margin-top: 6px; }
+    .stat .bar { background: #333; height: 6px; margin-top: 6px; }
+    .stat .bar > div { background: #55ff55; height: 100%; }
+  </style>
+</head>
+<body>
+  <h1>⚔️ MC 工具箱</h1>
+  <p id="user-info"></p>
+
+  <div class="nav">
+    <a href="/totem.html">不死图腾</a>
+    <a href="/cloud.html">网盘</a>
+    <a href="/draw.html">抽签器</a>
+    <a href="/vote.html">记票器</a>
+    <a href="/cps.html">手速测试</a>
+  </div>
+
+  <h2>服务器性能</h2>
+  <div id="stats">加载中...</div>
+
+  <p><a href="/login.html">登录 / 注册</a></p>
+
+  <script>
+    const token = localStorage.getItem('token');
+    const username = localStorage.getItem('username');
+    document.getElementById('user-info').textContent = token ? `已登录：${username}` : '未登录';
+
+    function bar(p) { return `<div class="bar"><div style="width:${Math.min(100,p)}%"></div></div>`; }
+    function fmtSize(n) {
+      if (!n) return '0 B';
+      if (n < 1024) return n + ' B';
+      if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+      if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+      return (n/1024/1024/1024).toFixed(2) + ' GB';
+    }
+    function fmtUptime(s) {
+      const d = Math.floor(s/86400);
+      const h = Math.floor(s%86400/3600);
+      const m = Math.floor(s%3600/60);
+      return `${d}d ${h}h ${m}m`;
+    }
+
+    async function refreshStats() {
+      if (!token) { document.getElementById('stats').innerHTML = '<p>请先登录</p>'; return; }
+      try {
+        const r = await fetch('/api/stats', { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!r.ok) return;
+        const d = await r.json();
+        const ramPct  = d.ramTotal  ? (d.ramUsed/d.ramTotal*100)   : 0;
+        const diskPct = d.diskTotal ? (d.diskUsed/d.diskTotal*100) : 0;
+        document.getElementById('stats').innerHTML = `
+          <div class="stat">
+            <div class="name">CPU 占用</div>
+            <div class="value">${d.cpu}%${d.cpuTemp ? ` · ${d.cpuTemp}°C` : ''}</div>
+            ${bar(d.cpu)}
+          </div>
+          <div class="stat">
+            <div class="name">内存</div>
+            <div class="value">${fmtSize(d.ramUsed)} / ${fmtSize(d.ramTotal)}</div>
+            ${bar(ramPct)}
+          </div>
+          <div class="stat">
+            <div class="name">磁盘</div>
+            <div class="value">${fmtSize(d.diskUsed)} / ${fmtSize(d.diskTotal)}</div>
+            ${bar(diskPct)}
+          </div>
+          <div class="stat">
+            <div class="name">运行时间</div>
+            <div class="value">${fmtUptime(d.uptime)}</div>
+          </div>
+        `;
+      } catch {}
+    }
+
+    refreshStats();
+    setInterval(refreshStats, 5000);
+  </script>
+</body>
+</html>

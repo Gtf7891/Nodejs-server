@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>手速测试</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #ddd; max-width: 700px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #55ff55; }
+    .row { margin: 12px 0; }
+    label { display: inline-block; width: 120px; color: #aaa; }
+    input, select { background: #333; color: #ddd; border: 1px solid #555; padding: 6px; }
+    button { background: #3a5a3a; color: #afa; border: 1px solid #5a8a5a; padding: 10px 24px; cursor: pointer; font-size: 16px; margin-top: 12px; }
+    #box {
+      width: 100%; height: 240px; background: #222; border: 2px solid #444;
+      display: flex; align-items: center; justify-content: center;
+      user-select: none; cursor: pointer; margin-top: 16px;
+      font-size: 32px; color: #55ff55;
+    }
+    #box.active { background: #2a4a2a; }
+    #result { margin-top: 16px; font-size: 20px; color: #ffaa00; min-height: 30px; }
+    a { color: #55ff55; }
+  </style>
+</head>
+<body>
+  <h1>⚡ 手速测试（CPS）</h1>
+
+  <div class="row">
+    <label>时长（秒）：</label>
+    <select id="duration">
+      <option value="5">5</option>
+      <option value="10" selected>10</option>
+      <option value="30">30</option>
+      <option value="60">60</option>
+    </select>
+  </div>
+
+  <button id="btn-start">开始</button>
+
+  <div id="box">点击开始</div>
+  <div id="result"></div>
+
+  <p><a href="/">返回首页</a></p>
+
+  <script>
+    const box = document.getElementById('box');
+    const result = document.getElementById('result');
+    const btn = document.getElementById('btn-start');
+
+    let active = false, clicks = 0, startTime = 0, timer = null, duration = 10;
+
+    function reset() {
+      active = false; clicks = 0; clearInterval(timer);
+      box.classList.remove('active');
+      box.textContent = '点击开始';
+      result.textContent = '';
+    }
+
+    function start() {
+      duration = parseInt(document.getElementById('duration').value);
+      clicks = 0;
+      active = true;
+      startTime = Date.now();
+      box.classList.add('active');
+      box.textContent = `连点！剩余 ${duration}s`;
+
+      timer = setInterval(() => {
+        const left = duration - Math.floor((Date.now() - startTime) / 1000);
+        if (left <= 0) {
+          clearInterval(timer);
+          active = false;
+          box.classList.remove('active');
+          const cps = (clicks / duration).toFixed(2);
+          box.textContent = `${clicks} 次`;
+          result.textContent = `CPS: ${cps}`;
+        } else {
+          box.textContent = `连点！剩余 ${left}s`;
+        }
+      }, 100);
+    }
+
+    btn.onclick = () => { reset(); start(); };
+    box.onclick = () => { if (active) clicks++; };
+  </script>
+</body>
+</html>

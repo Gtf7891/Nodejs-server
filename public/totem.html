@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>不死图腾生成器</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #ddd; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #55ff55; }
+    h2 { color: #aaa; font-weight: normal; border-top: 1px solid #333; padding-top: 24px; margin-top: 40px; }
+    .row { margin: 14px 0; }
+    label { display: inline-block; width: 140px; color: #aaa; }
+    select, input[type="file"] { background: #333; color: #ddd; border: 1px solid #555; padding: 6px; }
+    button { background: #3a5a3a; color: #afa; border: 1px solid #5a8a5a; padding: 10px 24px; cursor: pointer; font-size: 16px; margin-top: 12px; font-family: monospace; }
+    button:hover { background: #4a6a4a; }
+    #status { margin-top: 12px; color: #ffaa00; min-height: 20px; }
+    .cb label { width: auto; margin-left: 8px; }
+    a { color: #55ff55; }
+    .hint { font-size: 12px; color: #666; margin-top: 4px; }
+    ul { list-style: none; padding: 0; }
+    li { margin: 10px 0; padding: 10px; background: #222; border: 1px solid #333; }
+    li a { text-decoration: none; }
+    li a:hover { text-decoration: underline; }
+    .meta { color: #888; font-size: 12px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h1>⚔️ 不死图腾生成器</h1>
+  <p id="user-info"></p>
+
+  <div class="row">
+    <label>目标 MC 版本：</label>
+    <select id="version">
+      <option value="1.21.5">1.21.5+</option>
+      <option value="1.21.4">1.21.4</option>
+      <option value="1.21.3">1.21.2 ~ 1.21.3</option>
+      <option value="1.21.1">1.21 ~ 1.21.1</option>
+      <option value="1.20.6">1.20.5 ~ 1.20.6</option>
+      <option value="1.20.4">1.20.3 ~ 1.20.4</option>
+      <option value="1.20.2">1.20.2</option>
+      <option value="1.20.1">1.20 ~ 1.20.1</option>
+      <option value="1.19.4">1.19.4</option>
+      <option value="1.19.2">1.19 ~ 1.19.2</option>
+      <option value="1.18.2">1.18 ~ 1.18.2</option>
+      <option value="1.17.1">1.17 ~ 1.17.1</option>
+      <option value="1.16.5">1.16.5</option>
+      <option value="1.16.1">1.15 ~ 1.16.1</option>
+      <option value="1.14.4">1.13 ~ 1.14.4</option>
+      <option value="1.12.2">1.11 ~ 1.12.2</option>
+      <option value="1.8.9">1.6.1 ~ 1.8.9</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label>姿势：</label>
+    <select id="pose">
+      <option value="stand">站立</option>
+      <option value="doll">娃娃</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label>皮肤模型：</label>
+    <select id="variant">
+      <option value="auto">自动检测</option>
+      <option value="wide">Wide（经典 4px 手臂）</option>
+      <option value="slim">Slim（纤细 3px 手臂）</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label>皮肤 PNG：</label>
+    <input type="file" id="skin" accept="image/png">
+    <div class="hint">64×64；支持 Ears 皮肤（扩展区域不会渲染）</div>
+  </div>
+
+  <div class="cb">
+    <input type="checkbox" id="share" checked>
+    <label for="share">共享此资源包</label>
+  </div>
+
+  <button id="generate">生成并下载资源包</button>
+  <div id="status"></div>
+
+  <h2>共享资源包</h2>
+  <p id="shared-msg" style="color:#888;">加载中...</p>
+  <ul id="shared-list"></ul>
+
+  <p><a href="/">返回首页</a></p>
+
+  <script>
+    const token = localStorage.getItem('token');
+    const username = localStorage.getItem('username');
+    document.getElementById('user-info').textContent = token ? `已登录：${username}` : '未登录，请先登录';
+
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+      return (n/1024/1024).toFixed(2) + ' MB';
+    }
+
+    document.getElementById('generate').addEventListener('click', async () => {
+      const status = document.getElementById('status');
+      if (!token) { location.href = '/login.html'; return; }
+      const version = document.getElementById('version').value;
+      const pose    = document.getElementById('pose').value;
+      const variant = document.getElementById('variant').value;
+      const share   = document.getElementById('share').checked;
+      const file    = document.getElementById('skin').files[0];
+      if (!file) { status.textContent = '请选择皮肤文件'; return; }
+
+      status.textContent = '正在生成...';
+      const fd = new FormData();
+      fd.append('version', version);
+      fd.append('pose', pose);
+      fd.append('variant', variant);
+      fd.append('share', String(share));
+      fd.append('skin', file);
+
+      try {
+        const res = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: fd
+        });
+        if (res.status === 401) { location.href = '/login.html'; return; }
+        if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error || '生成失败'); }
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `totem_${version}_${variant}_${pose}.zip`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        status.textContent = '✅ 生成完成';
+        if (share) loadShared();
+      } catch (e) { status.textContent = `❌ ${e.message}`; }
+    });
+
+    async function loadShared() {
+      if (!token) return;
+      const r = await fetch('/api/shared', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.status === 401) { location.href = '/login.html'; return; }
+      const list = await r.json();
+      const msg = document.getElementById('shared-msg');
+      const ul  = document.getElementById('shared-list');
+      if (!list.length) { msg.textContent = '暂无共享资源包'; ul.innerHTML = ''; return; }
+      msg.textContent = `共 ${list.length} 个`;
+      ul.innerHTML = list.map(f => {
+        const t = new Date(f.mtime).toLocaleString();
+        return `<li>
+          <a href="${f.url}" download>${f.name}</a>
+          <div class="meta">${fmtSize(f.size)} · ${t}</div>
+        </li>`;
+      }).join('');
+    }
+
+    loadShared();
+    setInterval(loadShared, 10000);
+  </script>
+</body>
+</html>

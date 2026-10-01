@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>文件分享</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #ddd; max-width: 600px; margin: 80px auto; padding: 0 20px; }
+    h1 { color: #55ff55; }
+    input { width: 100%; padding: 10px; background: #333; color: #ddd; border: 1px solid #555; box-sizing: border-box; font-family: monospace; }
+    button { background: #3a5a3a; color: #afa; border: 1px solid #5a8a5a; padding: 10px 24px; cursor: pointer; font-family: monospace; margin-top: 12px; font-size: 16px; }
+    button:hover { background: #4a6a4a; }
+    a { color: #55ff55; }
+    .hint { color: #888; font-size: 12px; margin-top: 8px; }
+    #msg { color: #ffaa00; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>🔗 文件分享</h1>
+  <p>输入分享 token 下载文件：</p>
+  <input id="token" placeholder="32 位 hex token">
+  <button id="go">下载</button>
+  <div id="msg"></div>
+  <p><a href="/">返回首页</a> · <a href="/cloud.html">我的网盘</a></p>
+  <div class="hint">
+    分享链接形如 <code>/cloud.html?file=&lt;token&gt;</code>，访问后会直接开始下载。<br>
+    本页仅作为无参数进入时的兜底入口。
+  </div>
+
+  <script>
+    document.getElementById('go').onclick = () => {
+      const t = document.getElementById('token').value.trim();
+      if (!/^[a-f0-9]{32}$/.test(t)) {
+        document.getElementById('msg').textContent = 'token 格式不对（应为 32 位小写 hex）';
+        return;
+      }
+      location.href = `/api/cloud/public/${t}`;
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,557 @@
+import { Hono } from 'hono';
+import { serveStatic } from '@hono/node-server/serve-static';
+import { serve } from '@hono/node-server';
+import { jwt, sign } from 'hono/jwt';
+import bcrypt from 'bcryptjs';
+import { ZipWriter, BlobWriter, BlobReader } from '@zip.js/zip.js';
+import { PNG } from 'pngjs';
+import si from 'systeminformation';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import crypto from 'crypto';
+
+const __dirname  = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR   = path.join(__dirname, 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const SHARED_DIR = path.join(DATA_DIR, 'shared');
+const CLOUD_DIR  = path.join(DATA_DIR, 'cloud');
+const CHUNK_DIR  = path.join(DATA_DIR, 'chunks');
+const TICKET_FILE = path.join(DATA_DIR, 'tickets.json');
+
+for (const d of [DATA_DIR, SHARED_DIR, CLOUD_DIR, CHUNK_DIR]) {
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+}
+if (!fs.existsSync(USERS_FILE))  fs.writeFileSync(USERS_FILE, '[]');
+if (!fs.existsSync(TICKET_FILE)) fs.writeFileSync(TICKET_FILE, '{}');
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) { console.error('缺少 JWT_SECRET'); process.exit(1); }
+
+// ============ 模型部分 ============
+const RAW_STAND = JSON.parse(fs.readFileSync(path.join(__dirname, 'stand.json'), 'utf-8'));
+const RAW_DOLL  = JSON.parse(fs.readFileSync(path.join(__dirname, 'doll.json'),  'utf-8'));
+const ARM_STAND = { rIn: 4, rOut: 5, lIn: 6, lOut: 7 };
+const ARM_DOLL  = { rIn: 4, rOut: 5, lIn: 6, lOut: 7 };
+
+function rewriteTextures(m) {
+  const o = structuredClone(m);
+  if (o.textures) for (const k of Object.keys(o.textures)) {
+    if (typeof o.textures[k] === 'string') {
+      o.textures[k] = o.textures[k]
+        .replace('item/totem_of_undying', 'item/custom_totem')
+        .replace('item_of_undying',       'item/custom_totem');
+    }
+  }
+  return o;
+}
+function scaleUVWidth(f, k) {
+  if (!f?.uv) return;
+  const [x1,y1,x2,y2] = f.uv;
+  f.uv = [x1, y1, +(x1 + (x2-x1)*k).toFixed(4), y2];
+}
+function scaleArmUV(el, k) {
+  if (!el?.faces) return;
+  for (const f of ['north','south','up','down']) scaleUVWidth(el.faces[f], k);
+}
+function makeSlim(model, arms) {
+  const o = structuredClone(model);
+  const { rIn, rOut, lIn, lOut } = arms;
+  for (const i of [rIn,rOut,lIn,lOut]) if (o.elements[i]) scaleArmUV(o.elements[i], 0.75);
+  if (o.elements[rIn])  o.elements[rIn].to[0]   = 7;
+  if (o.elements[rOut]) o.elements[rOut].to[0]  = 7.25;
+  if (o.elements[lIn])  o.elements[lIn].from[0]  = -7;
+  if (o.elements[lOut]) o.elements[lOut].from[0] = -7.25;
+  return o;
+}
+function makeWide(model, arms) {
+  const o = structuredClone(model);
+  const { rIn, rOut, lIn, lOut } = arms;
+  for (const i of [rIn,rOut,lIn,lOut]) if (o.elements[i]) scaleArmUV(o.elements[i], 1/0.75);
+  return o;
+}
+const STAND_WIDE = rewriteTextures(RAW_STAND);
+const STAND_SLIM = makeSlim(STAND_WIDE, ARM_STAND);
+const DOLL_SLIM  = rewriteTextures(RAW_DOLL);
+const DOLL_WIDE  = makeWide(DOLL_SLIM, ARM_DOLL);
+const MODELS = {
+  'stand-wide': STAND_WIDE, 'stand-slim': STAND_SLIM,
+  'doll-wide':  DOLL_WIDE,  'doll-slim':  DOLL_SLIM
+};
+
+function detectVariant(buf) {
+  try {
+    const png = PNG.sync.read(buf);
+    if (png.width !== 64 || png.height !== 64) return 'wide';
+    let opaque = 0;
+    for (let y = 20; y < 32; y++)
+      for (let x = 54; x < 56; x++)
+        if (png.data[(y*64+x)*4+3] > 0) opaque++;
+    return opaque === 0 ? 'slim' : 'wide';
+  } catch { return 'wide'; }
+}
+
+// ============ 工具 ============
+const TRUSTED = /^(127\.|::1$|::ffff:127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/;
+function getClientIP(c) {
+  const sock = c.env?.incoming?.socket || c.env?.incoming?.connection;
+  const addr = sock?.remoteAddress || '';
+  if (TRUSTED.test(addr)) {
+    const xff = c.req.header('x-forwarded-for');
+    if (xff) return xff.split(',')[0].trim();
+    const xri = c.req.header('x-real-ip');
+    if (xri) return xri;
+  }
+  return addr || 'unknown';
+}
+function loadUsers() { try { return JSON.parse(fs.readFileSync(USERS_FILE,'utf-8')); } catch { return []; } }
+function saveUsers(u) {
+  const t = USERS_FILE + '.tmp';
+  fs.writeFileSync(t, JSON.stringify(u, null, 2));
+  fs.renameSync(t, USERS_FILE);
+}
+function loadTickets() { try { return JSON.parse(fs.readFileSync(TICKET_FILE,'utf-8')); } catch { return {}; } }
+function saveTickets(o) {
+  const t = TICKET_FILE + '.tmp';
+  fs.writeFileSync(t, JSON.stringify(o, null, 2));
+  fs.renameSync(t, TICKET_FILE);
+}
+function safeName(n) {
+  return String(n).replace(/[\/\\\0<>:"|?*]/g, '_').slice(0, 200);
+}
+function fmtDate(d) { return new Date(d).toISOString(); }
+
+const app = new Hono();
+app.use('/*', serveStatic({ root: path.join(__dirname, 'public') }));
+
+// ============ 注册 / 登录 ============
+app.post('/api/register', async (c) => {
+  const { username, password } = await c.req.json().catch(() => ({}));
+  if (!username || !password) return c.json({ error: '用户名和密码不能为空' }, 400);
+  if (username.length > 32 || password.length < 6)
+    return c.json({ error: '用户名 ≤ 32 字符，密码 ≥ 6 位' }, 400);
+
+  const ip = getClientIP(c);
+  const users = loadUsers();
+  if (users.find(u => u.ip === ip)) return c.json({ error: '该 IP 已注册' }, 403);
+  if (users.find(u => u.username === username)) return c.json({ error: '用户名已存在' }, 409);
+
+  const hash = await bcrypt.hash(password, 10);
+  const user = { id: crypto.randomBytes(8).toString('hex'), username, password: hash, ip, createdAt: fmtDate(Date.now()) };
+  users.push(user); saveUsers(users);
+
+  const token = await sign({ id: user.id, username: user.username, exp: Math.floor(Date.now()/1000) + 7*24*3600 }, JWT_SECRET);
+  return c.json({ token, username: user.username });
+});
+
+app.post('/api/login', async (c) => {
+  const { username, password } = await c.req.json().catch(() => ({}));
+  const user = loadUsers().find(u => u.username === username);
+  if (!user || !(await bcrypt.compare(password, user.password || '')))
+    return c.json({ error: '用户名或密码错误' }, 401);
+  const token = await sign({ id: user.id, username: user.username, exp: Math.floor(Date.now()/1000) + 7*24*3600 }, JWT_SECRET);
+  return c.json({ token, username: user.username });
+});
+
+const requireAuth = jwt({ secret: JWT_SECRET, alg: 'HS256' });
+
+// ============ 服务器性能 ============
+app.get('/api/stats', requireAuth, async (c) => {
+  try {
+    const [cpu, mem, fsSize, temp] = await Promise.all([
+      si.currentLoad(),
+      si.mem(),
+      si.fsSize(),
+      si.cpuTemperature().catch(() => ({ main: null }))
+    ]);
+    const root = fsSize.find(f => f.mount === '/' || f.mount === '/opt') || fsSize[0] || {};
+    return c.json({
+      cpu: +cpu.currentLoad.toFixed(1),
+      cpuTemp: temp.main ?? null,
+      ramUsed: mem.active,
+      ramTotal: mem.total,
+      diskUsed: root.used || 0,
+      diskTotal: root.size || 0,
+      uptime: si.time().uptime
+    });
+  } catch (e) {
+    return c.json({ error: e.message }, 500);
+  }
+});
+
+// ============ 抽签器 ============
+app.get('/api/tickets', requireAuth, (c) => {
+  const t = loadTickets();
+  return c.json({
+    list: t.list || [],
+    updatedAt: t.updatedAt || null,
+    updatedBy: t.updatedBy || null
+  });
+});
+
+app.post('/api/tickets', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const list = Array.isArray(body.list) ? body.list.filter(x => typeof x === 'string' && x.trim()) : [];
+  if (!list.length) return c.json({ error: '列表为空' }, 400);
+  const t = loadTickets();
+  t.list = list.map(s => s.trim());
+  t.updatedAt = fmtDate(Date.now());
+  t.updatedBy = c.get('jwtPayload').username;
+  saveTickets(t);
+  return c.json({ list: t.list, updatedAt: t.updatedAt, updatedBy: t.updatedBy });
+});
+
+// 抽签器重置
+app.post('/api/tickets/reset', requireAuth, (c) => {
+  const t = loadTickets();
+  t.list = [];
+  t.updatedAt = fmtDate(Date.now());
+  t.updatedBy = c.get('jwtPayload').username;
+  saveTickets(t);
+  return c.json({ list: [], updatedAt: t.updatedAt, updatedBy: t.updatedBy });
+});
+
+// ============ 记票器 ============
+app.get('/api/votes', requireAuth, (c) => {
+  const t = loadTickets();
+  return c.json(t.votes || { candidates: [], counts: [], updatedAt: null });
+});
+
+app.post('/api/votes', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const cands = Array.isArray(body.candidates)
+    ? body.candidates.map(s => String(s).trim()).filter(Boolean).slice(0, 200)
+    : [];
+  const counts = cands.map((_, i) => Number(body.counts?.[i]) || 0);
+  const t = loadTickets();
+  t.votes = { candidates: cands, counts, updatedAt: fmtDate(Date.now()) };
+  saveTickets(t);
+  return c.json(t.votes);
+});
+
+app.post('/api/votes/bump', requireAuth, async (c) => {
+  const { index, delta } = await c.req.json().catch(() => ({}));
+  const t = loadTickets();
+  if (!t.votes?.candidates?.length) return c.json({ error: '尚未设置候选人' }, 400);
+  const i = Number(index);
+  if (i < 0 || i >= t.votes.candidates.length) return c.json({ error: '索引无效' }, 400);
+  t.votes.counts[i] = Math.max(0, (t.votes.counts[i] || 0) + (Number(delta) || 0));
+  t.votes.updatedAt = fmtDate(Date.now());
+  saveTickets(t);
+  return c.json(t.votes);
+});
+
+// 记票器重置：清空票数但保留候选人
+app.post('/api/votes/reset', requireAuth, (c) => {
+  const t = loadTickets();
+  if (!t.votes?.candidates?.length) return c.json({ candidates: [], counts: [], updatedAt: fmtDate(Date.now()) });
+  t.votes.counts = t.votes.candidates.map(() => 0);
+  t.votes.updatedAt = fmtDate(Date.now());
+  saveTickets(t);
+  return c.json(t.votes);
+});
+
+// ============ 网盘 ============
+function userCloudDir(userId) {
+  const d = path.join(CLOUD_DIR, userId);
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+  return d;
+}
+
+app.get('/api/cloud', requireAuth, (c) => {
+  const uid = c.get('jwtPayload').id;
+  const d = userCloudDir(uid);
+  const list = fs.readdirSync(d)
+    .filter(f => !f.endsWith('.part') && !f.endsWith('.share.json'))
+    .map(f => {
+      const st = fs.statSync(path.join(d, f));
+      return { name: f, size: st.size, mtime: st.mtime };
+    })
+    .sort((a, b) => b.mtime - a.mtime);
+  return c.json(list);
+});
+
+app.get('/api/cloud/download/:name', requireAuth, (c) => {
+  const uid = c.get('jwtPayload').id;
+  const name = safeName(c.req.param('name'));
+  const fp = path.join(userCloudDir(uid), name);
+  if (!fs.existsSync(fp)) return c.json({ error: '不存在' }, 404);
+  const stat = fs.statSync(fp);
+  const total = stat.size;
+
+  const range = c.req.header('range');
+  if (range) {
+    const m = /bytes=(\d*)-(\d*)/.exec(range);
+    if (m) {
+      const start = m[1] ? parseInt(m[1]) : 0;
+      const end = m[2] ? parseInt(m[2]) : Math.min(start + 1024*1024 - 1, total - 1);
+      if (start >= total) {
+        return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${total}` } });
+      }
+      const stream = fs.createReadStream(fp, { start, end });
+      return new Response(stream, {
+        status: 206,
+        headers: {
+          'Content-Range': `bytes ${start}-${end}/${total}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(end - start + 1),
+          'Content-Type': 'application/octet-stream'
+        }
+      });
+    }
+  }
+
+  const stream = fs.createReadStream(fp);
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(total),
+      'Accept-Ranges': 'bytes',
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`
+    }
+  });
+});
+
+app.post('/api/cloud/upload/init', requireAuth, async (c) => {
+  const { filename, totalSize } = await c.req.json().catch(() => ({}));
+  if (!filename) return c.json({ error: '缺少文件名' }, 400);
+  const uid = c.get('jwtPayload').id;
+  const uploadId = crypto.randomBytes(12).toString('hex');
+  const dir = path.join(CHUNK_DIR, uid, uploadId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({
+    filename: safeName(filename),
+    totalSize: Number(totalSize) || 0,
+    createdAt: Date.now()
+  }));
+  return c.json({ uploadId });
+});
+
+app.post('/api/cloud/upload/chunk', requireAuth, async (c) => {
+  const uid = c.get('jwtPayload').id;
+  const form = await c.req.formData();
+  const uploadId = String(form.get('uploadId') || '');
+  const index = parseInt(form.get('index'));
+  const file = form.get('chunk');
+  if (!uploadId || Number.isNaN(index) || !file || typeof file === 'string')
+    return c.json({ error: '参数不完整' }, 400);
+  const dir = path.join(CHUNK_DIR, uid, uploadId);
+  if (!fs.existsSync(dir)) return c.json({ error: '上传会话不存在' }, 404);
+  const buf = Buffer.from(await file.arrayBuffer());
+  fs.writeFileSync(path.join(dir, `${index}.part`), buf);
+  return c.json({ ok: true });
+});
+
+app.post('/api/cloud/upload/complete', requireAuth, async (c) => {
+  const uid = c.get('jwtPayload').id;
+  const { uploadId } = await c.req.json().catch(() => ({}));
+  const dir = path.join(CHUNK_DIR, uid, String(uploadId));
+  if (!fs.existsSync(dir)) return c.json({ error: '上传会话不存在' }, 404);
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf-8'));
+  const parts = fs.readdirSync(dir)
+    .filter(f => f.endsWith('.part'))
+    .map(f => ({ i: parseInt(f), p: path.join(dir, f) }))
+    .sort((a, b) => a.i - b.i);
+
+  const target = path.join(userCloudDir(uid), meta.filename);
+  const ws = fs.createWriteStream(target);
+  for (const { p } of parts) {
+    await new Promise((res, rej) => {
+      const rs = fs.createReadStream(p);
+      rs.pipe(ws, { end: false });
+      rs.on('end', res);
+      rs.on('error', rej);
+    });
+  }
+  ws.end();
+  await new Promise(res => ws.on('finish', res));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  return c.json({ ok: true, name: meta.filename });
+});
+
+app.delete('/api/cloud/:name', requireAuth, (c) => {
+  const uid = c.get('jwtPayload').id;
+  const name = safeName(c.req.param('name'));
+  const fp = path.join(userCloudDir(uid), name);
+  if (!fs.existsSync(fp)) return c.json({ error: '不存在' }, 404);
+  fs.unlinkSync(fp);
+  // 同时清理分享
+  const sp = path.join(userCloudDir(uid), name + '.share.json');
+  if (fs.existsSync(sp)) fs.unlinkSync(sp);
+  return c.json({ ok: true });
+});
+
+// 生成分享链接
+app.post('/api/cloud/share/:name', requireAuth, (c) => {
+  const uid = c.get('jwtPayload').id;
+  const name = safeName(c.req.param('name'));
+  const dir = userCloudDir(uid);
+  const fp = path.join(dir, name);
+  if (!fs.existsSync(fp)) return c.json({ error: '文件不存在' }, 404);
+
+  const token = crypto.randomBytes(16).toString('hex');
+  fs.writeFileSync(path.join(dir, name + '.share.json'), JSON.stringify({
+    token, name, createdAt: Date.now()
+  }));
+  return c.json({ url: `/api/cloud/public/${token}` });
+});
+
+// 公开下载（无需登录）
+app.get('/api/cloud/public/:token', (c) => {
+  const token = c.req.param('token');
+  if (!/^[a-f0-9]{32}$/.test(token)) return c.json({ error: '非法 token' }, 400);
+  if (!fs.existsSync(CLOUD_DIR)) return c.json({ error: '不存在' }, 404);
+
+  for (const uid of fs.readdirSync(CLOUD_DIR)) {
+    const dir = path.join(CLOUD_DIR, uid);
+    if (!fs.statSync(dir).isDirectory()) continue;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.share.json')) continue;
+      try {
+        const j = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
+        if (j.token !== token) continue;
+        const fp = path.join(dir, j.name);
+        if (!fs.existsSync(fp)) continue;
+        const stat = fs.statSync(fp);
+        const total = stat.size;
+
+        const range = c.req.header('range');
+        if (range) {
+          const m = /bytes=(\d*)-(\d*)/.exec(range);
+          if (m) {
+            const start = m[1] ? parseInt(m[1]) : 0;
+            const end = m[2] ? parseInt(m[2]) : Math.min(start + 1024*1024 - 1, total - 1);
+            if (start >= total) {
+              return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${total}` } });
+            }
+            const stream = fs.createReadStream(fp, { start, end });
+            return new Response(stream, {
+              status: 206,
+              headers: {
+                'Content-Range': `bytes ${start}-${end}/${total}`,
+                'Accept-Ranges': 'bytes',
+                'Content-Length': String(end - start + 1),
+                'Content-Type': 'application/octet-stream'
+              }
+            });
+          }
+        }
+
+        const stream = fs.createReadStream(fp);
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'Content-Length': String(total),
+            'Accept-Ranges': 'bytes',
+            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(j.name)}`
+          }
+        });
+      } catch {}
+    }
+  }
+  return c.json({ error: '分享已失效' }, 404);
+});
+
+// ============ 图腾生成 ============
+function buildSharedName(pose, variant, username) {
+  const poseZh = pose === 'stand' ? '站立' : '娃娃';
+  const safeUser = username.replace(/[^\w\u4e00-\u9fa5-]/g, '_').slice(0, 20);
+  return `${poseZh}-${variant}-${safeUser}-${Date.now()}.zip`;
+}
+
+app.post('/api/generate', requireAuth, async (c) => {
+  const payload = c.get('jwtPayload');
+  if (!payload) return c.json({ error: '请先登录' }, 401);
+  const form = await c.req.formData();
+  const version   = String(form.get('version') || '1.21.5');
+  const variantIn = String(form.get('variant') || 'auto');
+  const pose      = String(form.get('pose')    || 'stand');
+  const share     = form.get('share') !== 'false';
+  const skinFile  = form.get('skin');
+  if (!skinFile || typeof skinFile === 'string')
+    return c.json({ error: '请上传皮肤文件' }, 400);
+  const skinBuffer = Buffer.from(await skinFile.arrayBuffer());
+  try {
+    const png = PNG.sync.read(skinBuffer);
+    if (png.width !== 64 || png.height !== 64)
+      return c.json({ error: '仅支持 64×64 皮肤' }, 400);
+  } catch { return c.json({ error: '无法解析 PNG' }, 400); }
+
+  let variant = variantIn === 'auto' ? detectVariant(skinBuffer) : variantIn;
+  if (!['wide','slim'].includes(variant)) variant = 'wide';
+  if (!['stand','doll'].includes(pose))   pose = 'stand';
+
+  const files = buildPack({ version, variant, pose, skinBuffer });
+  const zw = new ZipWriter(new BlobWriter('application/zip'));
+  for (const [p, blob] of Object.entries(files)) await zw.add(p, new BlobReader(blob));
+  const zipBuf = Buffer.from(await (await zw.close()).arrayBuffer());
+
+  if (share) {
+    const name = buildSharedName(pose, variant, payload.username);
+    fs.writeFileSync(path.join(SHARED_DIR, name), zipBuf);
+  }
+  return new Response(zipBuf, {
+    headers: {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="totem_${version}_${variant}_${pose}.zip"`
+    }
+  });
+});
+
+app.get('/api/shared', requireAuth, (c) => {
+  const list = fs.readdirSync(SHARED_DIR).filter(f => f.endsWith('.zip')).map(f => {
+    const st = fs.statSync(path.join(SHARED_DIR, f));
+    return { name: f, size: st.size, mtime: st.mtime, url: `/api/shared/${encodeURIComponent(f)}` };
+  }).sort((a, b) => b.mtime - a.mtime);
+  return c.json(list);
+});
+
+app.get('/api/shared/:name', requireAuth, (c) => {
+  const name = c.req.param('name');
+  if (!name.endsWith('.zip') || name.includes('/') || name.includes('..') || name.includes('\0'))
+    return c.json({ error: '非法' }, 400);
+  const fp = path.join(SHARED_DIR, name);
+  if (!fs.existsSync(fp)) return c.json({ error: '不存在' }, 404);
+  return new Response(fs.readFileSync(fp), { headers: { 'Content-Type': 'application/zip' } });
+});
+
+// ============ 资源包构建 ============
+const PACK_FORMATS = {
+  '1.21.5': { format: 55, style: 'items'  }, '1.21.4': { format: 46, style: 'items'  },
+  '1.21.3': { format: 42, style: 'legacy' }, '1.21.1': { format: 34, style: 'legacy' },
+  '1.20.6': { format: 32, style: 'legacy' }, '1.20.4': { format: 22, style: 'legacy' },
+  '1.20.2': { format: 18, style: 'legacy' }, '1.20.1': { format: 15, style: 'legacy' },
+  '1.19.4': { format: 13, style: 'legacy' }, '1.19.2': { format: 9,  style: 'legacy' },
+  '1.18.2': { format: 8,  style: 'legacy' }, '1.17.1': { format: 7,  style: 'legacy' },
+  '1.16.5': { format: 6,  style: 'legacy' }, '1.16.1': { format: 5,  style: 'legacy' },
+  '1.14.4': { format: 4,  style: 'legacy' }, '1.12.2': { format: 3,  style: 'legacy' },
+  '1.8.9':  { format: 1,  style: 'legacy' }
+};
+function jsonBlob(o) { return new Blob([JSON.stringify(o, null, 2)], { type: 'application/json' }); }
+
+function buildPack({ version, variant, pose, skinBuffer }) {
+  const entry = PACK_FORMATS[version] || PACK_FORMATS['1.21.5'];
+  const files = {};
+  const meta = { pack: { pack_format: entry.format, description: `不死图腾 doll (${variant}, ${pose === 'stand' ? '站立' : '娃娃'})` } };
+  if (entry.format >= 18) meta.pack.supported_formats = [4, entry.format];
+  files['pack.mcmeta'] = jsonBlob(meta);
+  files['assets/minecraft/textures/item/custom_totem.png'] = new Blob([skinBuffer], { type: 'image/png' });
+  files['assets/minecraft/models/item/custom_totem.json'] = jsonBlob(MODELS[`${pose}-${variant}`]);
+  if (entry.style === 'items') {
+    files['assets/minecraft/items/totem_of_undying.json'] = jsonBlob({
+      model: { type: 'minecraft:model', model: 'minecraft:item/custom_totem' }
+    });
+  } else {
+    files['assets/minecraft/models/item/totem_of_undying.json'] = jsonBlob({
+      parent: 'minecraft:item/custom_totem'
+    });
+  }
+  return files;
+}
+
+// ============ 启动 ============
+const port = 3000;
+serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => {
+  console.log(`服务已启动 http://0.0.0.0:${info.port}`);
+});

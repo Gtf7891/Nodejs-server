@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>网盘</title>
+  <style>
+    body { font-family: monospace; background: #1a1a1a; color: #ddd; max-width: 900px; margin: 40px auto; padding: 0 20px; }
+    h1 { color: #55ff55; }
+    button, input[type="file"] { background: #3a5a3a; color: #afa; border: 1px solid #5a8a5a; padding: 8px 16px; cursor: pointer; font-family: monospace; }
+    button:hover { background: #4a6a4a; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    th, td { border-bottom: 1px solid #333; padding: 8px; text-align: left; }
+    th { color: #888; font-weight: normal; }
+    a { color: #55ff55; }
+    #progress { margin-top: 12px; color: #ffaa00; }
+    .bar { background: #333; height: 8px; margin-top: 6px; }
+    .bar > div { background: #55ff55; height: 100%; width: 0; transition: width .1s; }
+    .share-url { color: #ffaa00; font-size: 12px; user-select: all; }
+  </style>
+</head>
+<body>
+  <h1>📦 个人网盘</h1>
+  <p id="who"></p>
+
+  <div>
+    <input type="file" id="upload">
+    <button id="btn-upload">分块上传</button>
+  </div>
+  <div class="bar"><div id="bar"></div></div>
+  <div id="progress"></div>
+
+  <table>
+    <thead>
+      <tr><th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
+    </thead>
+    <tbody id="list"></tbody>
+  </table>
+
+  <p><a href="/">返回首页</a></p>
+
+  <script>
+    const token = localStorage.getItem('token');
+
+    // ?file= 参数：直接公开下载
+    const params = new URLSearchParams(location.search);
+    const directFile = params.get('file');
+    if (directFile) {
+      // 通过公开分享 token 下载
+      location.href = `/api/cloud/public/${encodeURIComponent(directFile)}`;
+    }
+
+    if (!token) location.href = '/login.html';
+    document.getElementById('who').textContent = `已登录：${localStorage.getItem('username')}`;
+
+    const CHUNK_SIZE = 1 * 1024 * 1024;
+
+    function fmtSize(n) {
+      if (n < 1024) return n + ' B';
+      if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+      if (n < 1024*1024*1024) return (n/1024/1024).toFixed(2) + ' MB';
+      return (n/1024/1024/1024).toFixed(2) + ' GB';
+    }
+
+    async function load() {
+      const r = await fetch('/api/cloud', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.status === 401) { location.href = '/login.html'; return; }
+      const list = await r.json();
+      document.getElementById('list').innerHTML = list.map(f => `
+        <tr>
+          <td>${f.name}</td>
+          <td>${fmtSize(f.size)}</td>
+          <td>${new Date(f.mtime).toLocaleString()}</td>
+          <td>
+            <a href="/api/cloud/download/${encodeURIComponent(f.name)}" download>下载</a>
+            ·
+            <a href="#" data-share="${encodeURIComponent(f.name)}">分享</a>
+            ·
+            <a href="#" data-del="${encodeURIComponent(f.name)}">删除</a>
+            <div class="share-url" data-share-url="${encodeURIComponent(f.name)}"></div>
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="4">空</td></tr>';
+
+      document.querySelectorAll('[data-share]').forEach(a => {
+        a.onclick = async (e) => {
+          e.preventDefault();
+          const name = decodeURIComponent(a.dataset.share);
+          const r = await fetch(`/api/cloud/share/${encodeURIComponent(name)}`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (!r.ok) return;
+          const { url } = await r.json();
+          const full = `${location.origin}/cloud.html?file=${url.split('/').pop()}`;
+          const holder = document.querySelector(`[data-share-url="${a.dataset.share}"]`);
+          holder.textContent = full;
+          holder.onclick = () => {
+            navigator.clipboard?.writeText(full);
+            holder.textContent = '已复制 ✓ ' + full;
+          };
+        };
+      });
+
+      document.querySelectorAll('[data-del]').forEach(a => {
+        a.onclick = async (e) => {
+          e.preventDefault();
+          if (!confirm('确认删除？')) return;
+          const name = decodeURIComponent(a.dataset.del);
+          await fetch(`/api/cloud/${encodeURIComponent(name)}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          load();
+        };
+      });
+    }
+
+    async function upload() {
+      const file = document.getElementById('upload').files[0];
+      if (!file) return;
+      const prog = document.getElementById('progress');
+      const bar  = document.getElementById('bar');
+      const total = Math.ceil(file.size / CHUNK_SIZE);
+
+      prog.textContent = '初始化...';
+      const init = await fetch('/api/cloud/upload/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ filename: file.name, totalSize: file.size })
+      });
+      if (!init.ok) { prog.textContent = '初始化失败'; return; }
+      const { uploadId } = await init.json();
+
+      for (let i = 0; i < total; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const fd = new FormData();
+        fd.append('uploadId', uploadId);
+        fd.append('index', i);
+        fd.append('chunk', file.slice(start, end));
+        const r = await fetch('/api/cloud/upload/chunk', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+          body: fd
+        });
+        if (!r.ok) { prog.textContent = `第 ${i+1} 块失败`; return; }
+        const pct = Math.round((i+1) / total * 100);
+        bar.style.width = pct + '%';
+        prog.textContent = `上传中 ${pct}%`;
+      }
+
+      prog.textContent = '合并中...';
+      await fetch('/api/cloud/upload/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ uploadId })
+      });
+      prog.textContent = '✅ 完成';
+      bar.style.width = '0';
+      load();
+    }
+
+    document.getElementById('btn-upload').onclick = upload;
+    load();
+  </script>
+</body>
+</html>

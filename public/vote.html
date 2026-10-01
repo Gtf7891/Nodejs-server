@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>记票器</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: monospace; background: #1a1a1a; color: #ddd;
+      display: flex; flex-direction: column;
+      height: 100vh; overflow: hidden;
+    }
+    header {
+      padding: 8px 16px; border-bottom: 1px solid #333;
+      display: flex; align-items: center; gap: 12px;
+    }
+    header h1 { color: #55ff55; margin: 0; font-size: 18px; }
+    header button {
+      background: #3a5a3a; color: #afa; border: 1px solid #5a8a5a;
+      padding: 6px 12px; cursor: pointer; font-family: monospace;
+    }
+    header button:hover { background: #4a6a4a; }
+    header button.danger { background: #5a3a3a; border-color: #8a5a5a; }
+    header button.danger:hover { background: #7a4a4a; }
+    #cands-input { flex: 1; }
+    #cands-input textarea {
+      width: 100%; height: 60px; background: #222; color: #ddd;
+      border: 1px solid #444; padding: 6px; box-sizing: border-box;
+      font-family: monospace; resize: none;
+    }
+    #grid {
+      flex: 1; display: grid; gap: 6px; padding: 8px;
+      overflow: auto;
+    }
+    .cell {
+      background: #222; border: 1px solid #444;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 8px; min-height: 60px;
+    }
+    .cell .name { font-size: 14px; color: #ddd; text-align: center; word-break: break-all; }
+    .cell .count { font-size: 32px; color: #55ff55; font-weight: bold; margin: 4px 0; }
+    .cell .btns { display: flex; gap: 8px; }
+    .cell button {
+      background: #333; color: #ddd; border: 1px solid #555;
+      padding: 4px 14px; cursor: pointer; font-family: monospace; font-size: 16px;
+    }
+    .cell button:hover { background: #444; }
+    .cell .minus { background: #5a3a3a; border-color: #8a5a5a; }
+    .cell .plus  { background: #3a5a3a; border-color: #5a8a5a; }
+    #msg { color: #ffaa00; padding: 0 16px 8px; }
+    a { color: #55ff55; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📊 记票器</h1>
+    <div id="cands-input" style="display:none;">
+      <textarea id="cands" placeholder="每行一个候选人"></textarea>
+    </div>
+    <button id="btn-toggle">设置候选人</button>
+    <button id="btn-save" style="display:none;">保存</button>
+    <button id="btn-reset" class="danger">重置票数</button>
+    <button id="btn-end">结束投票 →</button>
+    <a href="/" style="margin-left:auto;">返回首页</a>
+  </header>
+  <div id="msg"></div>
+  <div id="grid"></div>
+
+  <script>
+    const token = localStorage.getItem('token');
+    if (!token) location.href = '/login.html';
+
+    let state = { candidates: [], counts: [] };
+    let editing = false;
+
+    function autoFit(n) {
+      const grid = document.getElementById('grid');
+      const W = grid.clientWidth  - 16;
+      const H = grid.clientHeight - 16;
+      const cols = Math.max(1, Math.round(Math.sqrt(n * W / H / 1.5)));
+      return Math.min(cols, n);
+    }
+
+    function render() {
+      const grid = document.getElementById('grid');
+      if (!state.candidates.length) {
+        grid.innerHTML = '<div style="color:#888;padding:20px;">尚未设置候选人，点右上角「设置候选人」</div>';
+        return;
+      }
+      const n = state.candidates.length;
+      const cols = autoFit(n);
+      const rows = Math.ceil(n / cols);
+      grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      grid.style.gridTemplateRows    = `repeat(${rows}, 1fr)`;
+
+      grid.innerHTML = state.candidates.map((c, i) => `
+        <div class="cell">
+          <div class="name">${c}</div>
+          <div class="count">${state.counts[i] || 0}</div>
+          <div class="btns">
+            <button class="minus" data-i="${i}" data-d="-1">−1</button>
+            <button class="plus"  data-i="${i}" data-d="1">+1</button>
+          </div>
+        </div>
+      `).join('');
+
+      grid.querySelectorAll('button[data-i]').forEach(b => {
+        b.onclick = async () => {
+          const i = +b.dataset.i, d = +b.dataset.d;
+          const r = await fetch('/api/votes/bump', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({ index: i, delta: d })
+          });
+          if (r.ok) { state = await r.json(); render(); }
+        };
+      });
+    }
+
+    async function load() {
+      const r = await fetch('/api/votes', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (r.status === 401) { location.href = '/login.html'; return; }
+      state = await r.json();
+      if (state.candidates.length && !editing) {
+        document.getElementById('cands').value = state.candidates.join('\n');
+      }
+      render();
+    }
+
+    document.getElementById('btn-toggle').onclick = () => {
+      editing = !editing;
+      document.getElementById('cands-input').style.display = editing ? 'block' : 'none';
+      document.getElementById('btn-save').style.display = editing ? 'inline-block' : 'none';
+      document.getElementById('btn-toggle').textContent = editing ? '取消' : '设置候选人';
+    };
+
+    document.getElementById('btn-save').onclick = async () => {
+      const list = document.getElementById('cands').value.split('\n').map(s => s.trim()).filter(Boolean);
+      if (!list.length) { document.getElementById('msg').textContent = '请输入候选人'; return; }
+      const r = await fetch('/api/votes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ candidates: list, counts: list.map(() => 0) })
+      });
+      if (r.ok) {
+        state = await r.json();
+        editing = false;
+        document.getElementById('cands-input').style.display = 'none';
+        document.getElementById('btn-save').style.display = 'none';
+        document.getElementById('btn-toggle').textContent = '设置候选人';
+        document.getElementById('msg').textContent = '✅ 已保存';
+        render();
+      }
+    };
+
+    document.getElementById('btn-reset').onclick = async () => {
+      if (!state.candidates.length) { document.getElementById('msg').textContent = '暂无候选人'; return; }
+      if (!confirm('确认将所有候选人票数清零？候选人保留。')) return;
+      const r = await fetch('/api/votes/reset', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (r.ok) {
+        state = await r.json();
+        document.getElementById('msg').textContent = '✅ 票数已重置';
+        render();
+      }
+    };
+
+    document.getElementById('btn-end').onclick = () => {
+      location.href = '/vote-result.html';
+    };
+
+    window.addEventListener('resize', render);
+    load();
+    setInterval(load, 3000);
+  </script>
+</body>
+</html>
