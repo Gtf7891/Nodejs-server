@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>皮肤获取器</title>
+<style>
+  @font-face { font-family: 'Unifont'; src: url('/fonts/unifont.woff2') format('woff2'); font-display: swap; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Unifont', 'Courier New', monospace;
+    background: #1a1a1a; color: #ddd;
+    image-rendering: pixelated;
+    max-width: 900px; margin: 0 auto; padding: 40px 20px;
+  }
+  h1 { color: #55ff55; text-shadow: 2px 2px 0 #000; }
+  .search-box { display: flex; gap: 10px; margin: 24px 0; flex-wrap: wrap; }
+  input[type="text"] {
+    flex: 1; min-width: 200px;
+    background: #111; border: 3px solid #000;
+    box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #555;
+    color: #ddd; padding: 12px 16px;
+    font-family: inherit; font-size: 16px; outline: none;
+  }
+  input[type="text"]:focus { border-color: #55ff55; }
+  select {
+    background: #111; border: 3px solid #000;
+    box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #555;
+    color: #ddd; padding: 12px 16px;
+    font-family: inherit; font-size: 14px; outline: none;
+    cursor: pointer;
+  }
+  select:focus { border-color: #55ff55; }
+  button {
+    background: #3a5a3a; color: #afa; border: 3px solid #000;
+    box-shadow: inset 2px 2px 0 #6a9a6a, inset -2px -2px 0 #1a2a1a;
+    padding: 12px 28px; font-family: inherit; font-size: 16px; cursor: pointer;
+  }
+  button:hover { background: #4a6a4a; }
+  button:active { box-shadow: inset -2px -2px 0 #6a9a6a, inset 2px 2px 0 #1a2a1a; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+  .controls label { color: #aaa; font-size: 13px; }
+  #result {
+    display: none; background: #222; border: 3px solid #000;
+    box-shadow: inset 3px 3px 0 #4a4a4a;
+    padding: 24px; margin-top: 24px;
+  }
+  #result.show { display: block; }
+  .info-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  .renders { display: flex; gap: 20px; flex-wrap: wrap; }
+  .renders img { image-rendering: pixelated; border: 3px solid #000; background: #111; }
+  .meta { flex: 1; min-width: 200px; line-height: 2; }
+  .meta b { color: #55ff55; }
+  .meta code { background: #111; padding: 2px 8px; border: 1px solid #444; word-break: break-all; font-size: 12px; }
+  .uuid { font-size: 12px; color: #888; word-break: break-all; }
+  .source-tag {
+    display: inline-block; font-size: 11px; padding: 2px 8px;
+    border: 1px solid #555; color: #aaa; margin-left: 8px;
+  }
+  .source-tag.minecraftservices { border-color: #55ff55; color: #55ff55; }
+  .source-tag.minotar { border-color: #55ffff; color: #55ffff; }
+  #msg { color: #ffaa00; margin: 12px 0; line-height: 1.6; }
+  #msg .hint { color: #888; font-size: 12px; margin-top: 4px; }
+  a { color: #55ff55; }
+  @media (max-width: 600px) {
+    .search-box { flex-direction: column; }
+    .renders img { max-width: 100%; height: auto; }
+    .controls { flex-direction: column; align-items: stretch; }
+  }
+</style>
+</head>
+<body>
+  <h1>🎨 皮肤获取器</h1>
+  <p>输入 Java 版用户名，查询并渲染皮肤。</p>
+
+  <div class="search-box">
+    <input id="username" type="text" placeholder="输入 Java 版游戏名，如 Notch" value="Notch">
+    <button id="go">查询</button>
+  </div>
+
+  <div class="controls">
+    <label>查询接口：</label>
+    <select id="source">
+      <option value="auto">自动（先官方，失败后 Minotar）</option>
+      <option value="minecraftservices">Minecraft Services（微软官方）</option>
+      <option value="minotar">Minotar（直接用用户名）</option>
+    </select>
+    <label>渲染源：</label>
+    <select id="renderer">
+      <option value="crafatar">Crafatar</option>
+      <option value="minotar">Minotar</option>
+      <option value="crafthead">Crafthead</option>
+      <option value="visage">Visage</option>
+    </select>
+  </div>
+
+  <div id="msg"></div>
+  <div id="result">
+    <div class="info-row">
+      <div class="renders">
+        <div>
+          <img id="avatar" width="128" height="128" alt="头像">
+          <p style="text-align:center;font-size:12px;color:#888">头像</p>
+        </div>
+        <div>
+          <img id="body" height="240" alt="全身">
+          <p style="text-align:center;font-size:12px;color:#888">3D 全身</p>
+        </div>
+        <div>
+          <img id="rawskin" width="192" height="192" alt="原始皮肤">
+          <p style="text-align:center;font-size:12px;color:#888">原始皮肤</p>
+        </div>
+      </div>
+      <div class="meta">
+        <div><b>用户名：</b><span id="name"></span><span id="sourceTag" class="source-tag"></span></div>
+        <div><b>UUID：</b><div class="uuid" id="uuid"></div></div>
+        <div><b>皮肤直链：</b><br><code id="skinurl"></code></div>
+        <div style="margin-top:12px">
+          <a id="download" download="skin.png">⬇ 下载原始皮肤</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p><a href="/">返回首页</a></p>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const SOURCE_NAMES = {
+    minecraftservices: 'Minecraft Services',
+    minotar: 'Minotar'
+  };
+
+  // 各渲染源的 URL 模板。id 为空时用 name 替代
+  const RENDERERS = {
+    crafatar: {
+      avatar: (id, name) => id ? `https://crafatar.com/avatars/${id}?size=128&overlay` : '',
+      body:   (id) => id ? `https://crafatar.com/renders/body/${id}?scale=10` : '',
+      raw:    (id) => id ? `https://crafatar.com/skins/${id}` : ''
+    },
+    minotar: {
+      avatar: (id, name) => `https://minotar.net/helm/${encodeURIComponent(name)}/128`,
+      body:   (id, name) => `https://minotar.net/body/${encodeURIComponent(name)}/240`,
+      raw:    (id, name) => `https://minotar.net/skin/${encodeURIComponent(name)}`
+    },
+    crafthead: {
+      avatar: (id, name) => `https://crafthead.net/helm/${id || name}/128`,
+      body:   (id, name) => `https://crafthead.net/body/${id || name}/240`,
+      raw:    (id, name) => `https://crafthead.net/skin/${id || name}`
+    },
+    visage: {
+      avatar: (id, name) => `https://visage.surgeplay.com/face/128/${id || name}`,
+      body:   (id, name) => `https://visage.surgeplay.com/full/240/${id || name}`,
+      raw:    (id, name) => `https://visage.surgeplay.com/skin/${id || name}`
+    }
+  };
+
+  function clearImages() {
+    $('avatar').src = ''; $('body').src = ''; $('rawskin').src = '';
+  }
+
+  function applyRender(id, name, rendererKey) {
+    const rnd = RENDERERS[rendererKey] || RENDERERS.crafatar;
+
+    // 如果选了 Crafatar 但没有 UUID（选了 Minotar 查询源），自动切到 Minotar 渲染
+    if (rendererKey === 'crafatar' && !id) {
+      const m = RENDERERS.minotar;
+      $('avatar').src  = m.avatar(id, name);
+      $('body').src    = m.body(id, name);
+      $('rawskin').src = m.raw(id, name);
+      $('skinurl').textContent = m.raw(id, name);
+      $('download').href = m.raw(id, name);
+      return;
+    }
+
+    $('avatar').src  = rnd.avatar(id, name);
+    $('body').src    = rnd.body(id, name);
+    $('rawskin').src = rnd.raw(id, name);
+    $('skinurl').textContent = rnd.raw(id, name);
+    $('download').href = rnd.raw(id, name);
+  }
+
+  async function lookup() {
+    const username = $('username').value.trim();
+    if (!username) return;
+    const source = $('source').value;
+    const renderer = $('renderer').value;
+
+    $('msg').innerHTML = '查询中…';
+    $('result').classList.remove('show');
+    clearImages();
+    $('go').disabled = true;
+
+    try {
+      const url = `/api/mc/profile/${encodeURIComponent(username)}?source=${source}`;
+      const r = await fetch(url);
+      const data = await r.json();
+
+      if (!r.ok) {
+        let html = '❌ ' + (data.error || '查询失败');
+        if (data.hint) html += `<div class="hint">${data.hint}</div>`;
+        $('msg').innerHTML = html;
+        return;
+      }
+
+      const { id, name, source: usedSource } = data;
+      $('name').textContent = name;
+      $('uuid').textContent = id || '（Minotar 不返回 UUID）';
+
+      const tag = $('sourceTag');
+      tag.className = 'source-tag ' + (usedSource || '');
+      tag.textContent = SOURCE_NAMES[usedSource] || usedSource || '';
+
+      applyRender(id, name, renderer);
+
+      $('msg').innerHTML = '✅ 查询成功' + (data.cached ? '（缓存）' : '');
+      $('result').classList.add('show');
+    } catch (e) {
+      $('msg').textContent = '❌ 网络错误：' + e.message;
+    } finally {
+      $('go').disabled = false;
+    }
+  }
+
+  $('go').onclick = lookup;
+  $('username').addEventListener('keydown', e => { if (e.key === 'Enter') lookup(); });
+  $('renderer').onchange = () => { if ($('result').classList.contains('show')) lookup(); };
+</script>
+</body>
+</html>

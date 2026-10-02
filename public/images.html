@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>图床</title>
+<style>
+  @font-face { font-family: 'Unifont'; src: url('/fonts/unifont.woff2') format('woff2'); font-display: swap; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Unifont', monospace; background: #1a1a1a; color: #ddd;
+    max-width: 1100px; margin: 0 auto; padding: 40px 20px;
+  }
+  h1 { color: #55ff55; text-shadow: 2px 2px 0 #000; }
+  .dropzone {
+    background: #222; border: 3px dashed #555;
+    box-shadow: inset 3px 3px 0 #1a1a1a;
+    padding: 40px; text-align: center;
+    cursor: pointer; transition: all 0.15s;
+    margin: 20px 0;
+  }
+  .dropzone:hover, .dropzone.drag { border-color: #55ff55; background: #2a3a2a; }
+  .dropzone p { color: #888; margin: 8px 0 0; font-size: 14px; }
+  .dropzone .icon { font-size: 48px; }
+  button {
+    background: #3a5a3a; color: #afa; border: 3px solid #000;
+    box-shadow: inset 2px 2px 0 #6a9a6a, inset -2px -2px 0 #1a2a1a;
+    padding: 10px 20px; font-family: inherit; font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: #4a6a4a; }
+  button:active { box-shadow: inset -2px -2px 0 #6a9a6a, inset 2px 2px 0 #1a2a1a; }
+  button.danger { background: #5a3a3a; color: #faa; }
+  button.danger:hover { background: #6a4a4a; }
+  #msg { margin: 12px 0; color: #ffaa00; font-size: 14px; }
+  #progress { color: #55ff55; margin: 8px 0; font-size: 14px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 16px; margin-top: 24px;
+  }
+  .card {
+    background: #222; border: 3px solid #000;
+    box-shadow: inset 3px 3px 0 #4a4a4a;
+    padding: 10px;
+  }
+  .card img {
+    width: 100%; height: 140px; object-fit: cover;
+    background: #111; border: 2px solid #000;
+    image-rendering: pixelated;
+    display: block;
+  }
+  .card .meta {
+    font-size: 11px; color: #888;
+    margin: 8px 0; word-break: break-all;
+    line-height: 1.5;
+  }
+  .card .actions { display: flex; gap: 6px; }
+  .card .actions button {
+    flex: 1; padding: 6px 4px; font-size: 11px;
+  }
+  a { color: #55ff55; }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 16px 0; }
+  .toolbar input[type="text"] {
+    flex: 1; min-width: 200px;
+    background: #111; border: 3px solid #000;
+    box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #555;
+    color: #ddd; padding: 10px; font-family: inherit; font-size: 13px;
+    outline: none;
+  }
+</style>
+</head>
+<body>
+  <h1>🖼️ 图床</h1>
+  <p>上传图片，生成直链，可贴到任何地方。</p>
+
+  <div id="dropzone" class="dropzone">
+    <div class="icon">📁</div>
+    <div>点击选择图片，或拖拽到这里</div>
+    <p>支持 PNG / JPG / GIF / WebP / AVIF，单张 ≤ 10MB，单次 ≤ 20 张</p>
+    <input type="file" id="file" accept="image/*" multiple hidden>
+  </div>
+
+  <div id="msg"></div>
+  <div id="progress"></div>
+
+  <div class="toolbar">
+    <input type="text" id="filter" placeholder="按文件名筛选…">
+    <button id="refresh">刷新</button>
+  </div>
+
+  <div class="grid" id="grid"></div>
+  <p style="margin-top:24px"><a href="/">返回首页</a></p>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const token = localStorage.getItem('token');
+  if (!token) location.href = '/login.html';
+
+  const AUTH = { 'Authorization': `Bearer ${token}` };
+  let allImages = [];
+
+  // ---- 上传 ----
+  const dropzone = $('dropzone');
+  const fileInput = $('file');
+
+  dropzone.onclick = () => fileInput.click();
+  fileInput.onchange = () => upload([...fileInput.files]);
+  fileInput.value = '';
+
+  ['dragenter','dragover'].forEach(ev => dropzone.addEventListener(ev, e => {
+    e.preventDefault(); dropzone.classList.add('drag');
+  }));
+  ['dragleave','drop'].forEach(ev => dropzone.addEventListener(ev, e => {
+    e.preventDefault(); dropzone.classList.remove('drag');
+  }));
+  dropzone.addEventListener('drop', e => {
+    const files = [...e.dataTransfer.files].filter(f => f.type.startsWith('image/'));
+    if (files.length) upload(files);
+  });
+
+  async function upload(files) {
+    if (!files.length) return;
+    const form = new FormData();
+    for (const f of files) form.append('files', f);
+    $('msg').textContent = '';
+    $('progress').textContent = `上传中…（${files.length} 张）`;
+
+    try {
+      const r = await fetch('/api/images/upload', {
+        method: 'POST',
+        headers: AUTH,
+        body: form
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+
+      const ok = data.results.filter(x => x.ok).length;
+      const fail = data.results.filter(x => !x.ok).length;
+      $('progress').textContent = '';
+      $('msg').textContent = `✅ 成功 ${ok} 张${fail ? ` · ❌ 失败 ${fail} 张` : ''}`;
+      load();
+    } catch (e) {
+      $('progress').textContent = '';
+      $('msg').textContent = '❌ ' + e.message;
+    }
+  }
+
+  // ---- 加载列表 ----
+  async function load() {
+    try {
+      const r = await fetch('/api/images', { headers: AUTH });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      allImages = await r.json();
+      render();
+    } catch (e) {
+      $('msg').textContent = '❌ 加载失败：' + e.message;
+    }
+  }
+
+  function fmt(n) {
+    if (n > 1024*1024) return (n/1024/1024).toFixed(2)+' MB';
+    if (n > 1024) return (n/1024).toFixed(1)+' KB';
+    return n + ' B';
+  }
+
+  function render() {
+    const filter = $('filter').value.toLowerCase();
+    const list = allImages.filter(x =>
+      !filter || (x.originalName || x.name).toLowerCase().includes(filter)
+    );
+
+    if (!list.length) {
+      $('grid').innerHTML = '<div style="color:#666;grid-column:1/-1;text-align:center;padding:40px">还没有图片</div>';
+      return;
+    }
+
+    $('grid').innerHTML = list.map(x => {
+      const fullUrl = location.origin + x.url;
+      return `<div class="card">
+        <img src="${x.url}" alt="${x.name}" loading="lazy">
+        <div class="meta">
+          ${x.originalName ? escapeHtml(x.originalName) + '<br>' : ''}
+          ${x.width && x.height ? x.width + '×' + x.height + ' · ' : ''}${fmt(x.size)}
+        </div>
+        <div class="actions">
+          <button onclick="copyUrl('${fullUrl}', this)">复制链接</button>
+          <button class="danger" onclick="del('${x.name}')">删除</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  window.copyUrl = async (url, btn) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      const old = btn.textContent;
+      btn.textContent = '已复制';
+      setTimeout(() => btn.textContent = old, 1000);
+    } catch {
+      prompt('复制链接：', url);
+    }
+  };
+
+  window.del = async (name) => {
+    if (!confirm('确定删除这张图？')) return;
+    const r = await fetch('/api/images/' + encodeURIComponent(name), {
+      method: 'DELETE',
+      headers: AUTH
+    });
+    if (r.ok) load();
+    else $('msg').textContent = '❌ 删除失败';
+  };
+
+  $('refresh').onclick = load;
+  $('filter').oninput = render;
+
+  load();
+</script>
+</body>
+</html>

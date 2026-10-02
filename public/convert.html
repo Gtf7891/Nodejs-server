@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>图片格式转换</title>
+<style>
+  @font-face { font-family: 'Unifont'; src: url('/fonts/unifont.woff2') format('woff2'); font-display: swap; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Unifont', monospace; background: #1a1a1a; color: #ddd;
+    max-width: 700px; margin: 0 auto; padding: 40px 20px;
+  }
+  h1 { color: #55ff55; text-shadow: 2px 2px 0 #000; }
+  .box {
+    background: #222; border: 3px solid #000;
+    box-shadow: inset 3px 3px 0 #4a4a4a;
+    padding: 24px; margin: 20px 0;
+  }
+  label { display: block; margin: 16px 0 8px; color: #aaa; font-size: 14px; }
+  select, input[type="range"] {
+    width: 100%; background: #111; color: #ddd;
+    border: 3px solid #000; box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 #555;
+    padding: 10px; font-family: inherit; font-size: 14px;
+  }
+  input[type="file"] {
+    width: 100%; background: #111; color: #ddd;
+    border: 3px solid #000; padding: 10px; font-family: inherit;
+  }
+  button {
+    background: #3a5a3a; color: #afa; border: 3px solid #000;
+    box-shadow: inset 2px 2px 0 #6a9a6a, inset -2px -2px 0 #1a2a1a;
+    padding: 12px 28px; font-family: inherit; font-size: 16px;
+    cursor: pointer; margin-top: 16px; width: 100%;
+  }
+  button:hover { background: #4a6a4a; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #msg { margin-top: 12px; color: #ffaa00; font-size: 14px; word-break: break-all; }
+  .quality-row { display: flex; align-items: center; gap: 12px; }
+  .quality-row input { flex: 1; }
+  .quality-row span { color: #55ff55; min-width: 40px; }
+  #preview { margin-top: 16px; display: none; }
+  #preview img { max-width: 100%; max-height: 200px; border: 3px solid #000; image-rendering: pixelated; }
+  #fileinfo { color: #888; font-size: 12px; margin-top: 8px; }
+  a { color: #55ff55; }
+</style>
+</head>
+<body>
+  <h1>🔄 图片格式转换</h1>
+  <div class="box">
+    <label>选择图片（PNG / JPG / WebP / AVIF / TIFF）</label>
+    <input type="file" id="file" accept="image/*">
+    <div id="fileinfo"></div>
+    <div id="preview"><img id="previewImg" alt="预览"></div>
+
+    <label>输出格式</label>
+    <select id="format">
+      <option value="webp">WebP（推荐，压缩率高）</option>
+      <option value="jpeg">JPEG（兼容性最好）</option>
+      <option value="png">PNG（无损）</option>
+      <option value="avif">AVIF（最高压缩率）</option>
+      <option value="tiff">TIFF（印刷用）</option>
+    </select>
+
+    <label>质量 <span id="qval">80</span></label>
+    <div class="quality-row">
+      <input type="range" id="quality" min="1" max="100" value="80">
+    </div>
+
+    <button id="convert">转换并下载</button>
+    <div id="msg"></div>
+  </div>
+  <p><a href="/">返回首页</a></p>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const token = localStorage.getItem('token');
+
+  $('quality').oninput = () => $('qval').textContent = $('quality').value;
+
+  $('file').onchange = async () => {
+    const file = $('file').files[0];
+    if (!file) return;
+
+    // 本地预览
+    const url = URL.createObjectURL(file);
+    $('previewImg').src = url;
+    $('preview').style.display = 'block';
+
+    const fmt = n => n > 1024*1024 ? (n/1024/1024).toFixed(2)+' MB' : (n/1024).toFixed(1)+' KB';
+    $('fileinfo').textContent = `文件名：${file.name} · 大小：${fmt(file.size)}`;
+
+    // 查询尺寸（需要登录）
+    if (!token) return;
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const r = await fetch('/api/convert/info', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: form
+      });
+      if (r.ok) {
+        const info = await r.json();
+        $('fileinfo').textContent += ` · 尺寸：${info.width}×${info.height} · 格式：${info.format}`;
+      }
+    } catch {}
+  };
+
+  $('convert').onclick = async () => {
+    const file = $('file').files[0];
+    if (!file) { $('msg').textContent = '❌ 请先选择图片'; return; }
+    if (!token) { $('msg').textContent = '❌ 请先登录'; return; }
+
+    $('msg').textContent = '转换中…';
+    $('convert').disabled = true;
+
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('format', $('format').value);
+      form.append('quality', $('quality').value);
+
+      const r = await fetch('/api/convert/image', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: form
+      });
+
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.error || 'HTTP ' + r.status);
+      }
+
+      const blob = await r.blob();
+      const origSize = +r.headers.get('X-Original-Size') || 0;
+      const newSize = +r.headers.get('X-Converted-Size') || 0;
+      const ratio = origSize ? ((1 - newSize / origSize) * 100).toFixed(1) : '?';
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'converted.' + ($('format').value === 'jpeg' ? 'jpg' : $('format').value);
+      a.click();
+      URL.revokeObjectURL(url);
+
+      const fmt = n => n > 1024*1024 ? (n/1024/1024).toFixed(2)+' MB' : (n/1024).toFixed(1)+' KB';
+      $('msg').textContent = `✅ 完成！${fmt(origSize)} → ${fmt(newSize)}（节省 ${ratio}%）`;
+    } catch (e) {
+      $('msg').textContent = '❌ ' + e.message;
+    } finally {
+      $('convert').disabled = false;
+    }
+  };
+</script>
+</body>
+</html>

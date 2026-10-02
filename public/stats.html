@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>服务器性能</title>
+<style>
+  @font-face { font-family: 'Unifont'; src: url('/fonts/unifont.woff2') format('woff2'); font-display: swap; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Unifont', 'Courier New', monospace;
+    background: #1a1a1a; color: #ddd;
+    image-rendering: pixelated;
+    max-width: 1100px; margin: 0 auto; padding: 24px 16px;
+  }
+  h1 { color: #55ff55; text-shadow: 2px 2px 0 #000; margin-bottom: 4px; }
+  .sub { color: #888; font-size: 12px; margin-bottom: 20px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: #222;
+    border: 3px solid #000;
+    box-shadow: inset 3px 3px 0 #4a4a4a, inset -3px -3px 0 #1a1a1a;
+    padding: 14px;
+  }
+  .card h2 {
+    color: #55ff55; font-size: 14px; margin: 0 0 12px 0;
+    padding-bottom: 6px; border-bottom: 2px solid #000;
+    text-shadow: 1px 1px 0 #000;
+  }
+
+  .bar {
+    height: 18px;
+    background: #111;
+    border: 2px solid #000;
+    box-shadow: inset 2px 2px 0 #000;
+    margin: 6px 0 10px 0;
+    position: relative;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    transition: width 0.4s ease;
+    background: repeating-linear-gradient(90deg, #55ff55 0px, #55ff55 8px, #44dd44 8px, #44dd44 10px);
+  }
+  .bar-fill.warn { background: repeating-linear-gradient(90deg, #ffaa00 0px, #ffaa00 8px, #dd8800 8px, #dd8800 10px); }
+  .bar-fill.danger { background: repeating-linear-gradient(90deg, #ff5555 0px, #ff5555 8px, #dd3333 8px, #dd3333 10px); }
+
+  .row {
+    display: flex; justify-content: space-between;
+    padding: 4px 0; font-size: 12px;
+    border-bottom: 1px solid #333;
+    gap: 10px;
+  }
+  .row:last-child { border-bottom: none; }
+  .row .label { color: #aaa; flex-shrink: 0; }
+  .row .value { color: #55ff55; font-weight: bold; text-align: right; word-break: break-all; }
+  .row .value.warn { color: #ffaa00; }
+  .row .value.danger { color: #ff5555; }
+
+  .big-num {
+    font-size: 28px; color: #55ff55;
+    text-shadow: 2px 2px 0 #000;
+    margin: 4px 0;
+  }
+  .big-num .unit { font-size: 14px; color: #888; }
+
+  .cores {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+    gap: 6px; margin-top: 8px;
+  }
+  .core {
+    background: #111; border: 2px solid #000;
+    padding: 6px; text-align: center; font-size: 11px;
+  }
+  .core .name { color: #888; }
+  .core .load { color: #55ff55; font-size: 14px; margin-top: 2px; }
+  .core .load.warn { color: #ffaa00; }
+  .core .load.danger { color: #ff5555; }
+
+  .footer { text-align: center; margin-top: 24px; }
+  .footer a { color: #55ff55; }
+  #error { color: #ff5555; margin: 12px 0; line-height: 1.6; }
+  @media (max-width: 600px) {
+    .grid { grid-template-columns: 1fr; }
+    .big-num { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+  <h1>📊 服务器性能</h1>
+  <div class="sub">每 3 秒自动刷新 · <span id="lastUpdate">—</span></div>
+  <div id="error"></div>
+  <div class="grid" id="grid"></div>
+  <p class="footer"><a href="/">返回首页</a></p>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const token = localStorage.getItem('token');
+  if (!token) location.href = '/login.html';
+
+  const AUTH = { 'Authorization': `Bearer ${token}` };
+
+  function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    if (n > 1024**4) return (n/1024**4).toFixed(2) + ' TB';
+    if (n > 1024**3) return (n/1024**3).toFixed(2) + ' GB';
+    if (n > 1024**2) return (n/1024**2).toFixed(1) + ' MB';
+    if (n > 1024) return (n/1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+  function fmtSpeed(n) { return fmtBytes(n) + '/s'; }
+  function fmtUptime(sec) {
+    if (!sec) return '—';
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    return `${m}m ${s}s`;
+  }
+  function barClass(pct) {
+    if (pct > 85) return 'danger';
+    if (pct > 65) return 'warn';
+    return '';
+  }
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function render(data) {
+    const c = data.cpu || {};
+    const m = data.memory || {};
+    const d = data.disk || {};
+    const n = data.network || {};
+    const s = data.system || {};
+
+    const cpuPct = c.currentLoad || 0;
+    const memPct = m.usagePercent || 0;
+    const diskPct = d.usePercent || 0;
+
+    let html = '';
+
+    // ---- CPU ----
+    html += `<div class="card">
+      <h2>⚙️ CPU</h2>
+      <div class="big-num">${cpuPct.toFixed(1)}<span class="unit">%</span></div>
+      <div class="bar"><div class="bar-fill ${barClass(cpuPct)}" style="width:${Math.min(cpuPct,100)}%"></div></div>
+      <div class="row"><span class="label">用户</span><span class="value">${(c.currentLoadUser||0).toFixed(1)}%</span></div>
+      <div class="row"><span class="label">系统</span><span class="value">${(c.currentLoadSystem||0).toFixed(1)}%</span></div>
+      <div class="row"><span class="label">空闲</span><span class="value">${(c.currentLoadIdle||0).toFixed(1)}%</span></div>
+      <div class="row"><span class="label">Nice</span><span class="value">${(c.currentLoadNice||0).toFixed(1)}%</span></div>
+      <div class="row"><span class="label">IRQ</span><span class="value">${(c.currentLoadIrq||0).toFixed(1)}%</span></div>
+      <div class="row"><span class="label">温度</span><span class="value">${c.temp != null ? c.temp.toFixed(1)+'°C' : '—'}</span></div>
+      <div class="row"><span class="label">最高温度</span><span class="value">${c.tempMax != null ? c.tempMax.toFixed(1)+'°C' : '—'}</span></div>
+      <div class="row"><span class="label">厂商</span><span class="value">${esc(c.manufacturer) || '—'}</span></div>
+      <div class="row"><span class="label">型号</span><span class="value">${esc(c.brand) || '—'}</span></div>
+      <div class="row"><span class="label">频率</span><span class="value">${c.speed ? c.speed+' GHz' : '—'}</span></div>
+      <div class="row"><span class="label">物理核心</span><span class="value">${c.physicalCores || '—'}</span></div>
+      <div class="row"><span class="label">逻辑核心</span><span class="value">${c.coresCount || '—'}</span></div>
+      ${(c.cores && c.cores.length) ? `
+        <div style="margin-top:10px;color:#888;font-size:11px">核心负载</div>
+        <div class="cores">${c.cores.map(x => `
+          <div class="core">
+            <div class="name">#${x.core}</div>
+            <div class="load ${barClass(x.load)}">${x.load}%</div>
+          </div>`).join('')}
+        </div>` : ''}
+    </div>`;
+
+    // ---- 内存 ----
+    html += `<div class="card">
+      <h2>🧠 内存</h2>
+      <div class="big-num">${memPct.toFixed(1)}<span class="unit">%</span></div>
+      <div class="bar"><div class="bar-fill ${barClass(memPct)}" style="width:${Math.min(memPct,100)}%"></div></div>
+      <div class="row"><span class="label">已用</span><span class="value">${fmtBytes(m.used)}</span></div>
+      <div class="row"><span class="label">总计</span><span class="value">${fmtBytes(m.total)}</span></div>
+      <div class="row"><span class="label">空闲</span><span class="value">${fmtBytes(m.free)}</span></div>
+      <div class="row"><span class="label">可用</span><span class="value">${fmtBytes(m.available)}</span></div>
+      <div class="row"><span class="label">Buff/Cache</span><span class="value">${fmtBytes(m.buffcache)}</span></div>
+      <div class="row"><span class="label">Buffers</span><span class="value">${fmtBytes(m.buffers)}</span></div>
+      <div class="row"><span class="label">Cached</span><span class="value">${fmtBytes(m.cached)}</span></div>
+      <div class="row"><span class="label">Slab</span><span class="value">${fmtBytes(m.slab)}</span></div>
+      <div class="row"><span class="label">Swap 已用</span><span class="value">${fmtBytes(m.swapUsed)}</span></div>
+      <div class="row"><span class="label">Swap 总计</span><span class="value">${fmtBytes(m.swapTotal)}</span></div>
+    </div>`;
+
+    // ---- 磁盘 ----
+    html += `<div class="card">
+      <h2>💾 磁盘</h2>
+      <div class="big-num">${diskPct.toFixed(1)}<span class="unit">%</span></div>
+      <div class="bar"><div class="bar-fill ${barClass(diskPct)}" style="width:${Math.min(diskPct,100)}%"></div></div>
+      <div class="row"><span class="label">已用</span><span class="value">${fmtBytes(d.used)}</span></div>
+      <div class="row"><span class="label">总计</span><span class="value">${fmtBytes(d.size)}</span></div>
+      <div class="row"><span class="label">可用</span><span class="value">${fmtBytes(d.available)}</span></div>
+      <div class="row"><span class="label">挂载点</span><span class="value">${esc(d.mount) || '—'}</span></div>
+      <div class="row"><span class="label">文件系统</span><span class="value">${esc(d.fs) || '—'}</span></div>
+      <div class="row"><span class="label">类型</span><span class="value">${esc(d.type) || '—'}</span></div>
+      ${(d.allMounts && d.allMounts.length > 1) ? `
+        <div style="margin-top:10px;color:#888;font-size:11px">所有挂载点</div>
+        ${d.allMounts.map(f => `
+          <div class="row">
+            <span class="label">${esc(f.mount)}</span>
+            <span class="value">${f.use}% · ${fmtBytes(f.used)}/${fmtBytes(f.size)}</span>
+          </div>`).join('')}` : ''}
+    </div>`;
+
+    // ---- 网络 ----
+    html += `<div class="card">
+      <h2>🌐 网络</h2>
+      <div class="row"><span class="label">下载</span><span class="value">${fmtSpeed(n.rxSec)}</span></div>
+      <div class="row"><span class="label">上传</span><span class="value">${fmtSpeed(n.txSec)}</span></div>
+      ${(n.interfaces && n.interfaces.length) ? `
+        <div style="margin-top:10px;color:#888;font-size:11px">活跃接口</div>
+        ${n.interfaces.map(i => `
+          <div class="row">
+            <span class="label">${esc(i.iface)}</span>
+            <span class="value">↓${fmtSpeed(i.rxSec)} ↑${fmtSpeed(i.txSec)}</span>
+          </div>`).join('')}` : ''}
+      ${(n.allInterfaces && n.allInterfaces.length) ? `
+        <div style="margin-top:10px;color:#888;font-size:11px">所有接口</div>
+        ${n.allInterfaces.map(i => `
+          <div class="row">
+            <span class="label">${esc(i.iface)} (${esc(i.operstate)})</span>
+            <span class="value">${esc(i.ip4) || '—'}</span>
+          </div>`).join('')}` : ''}
+    </div>`;
+
+    // ---- 系统 ----
+    html += `<div class="card">
+      <h2>🖥️ 系统</h2>
+      <div class="row"><span class="label">运行时间</span><span class="value">${fmtUptime(s.uptime)}</span></div>
+      <div class="row"><span class="label">主机名</span><span class="value">${esc(s.hostname) || '—'}</span></div>
+      <div class="row"><span class="label">发行版</span><span class="value">${esc(s.distro) || '—'}</span></div>
+      <div class="row"><span class="label">内核</span><span class="value">${esc(s.kernel) || '—'}</span></div>
+      <div class="row"><span class="label">架构</span><span class="value">${esc(s.arch) || '—'}</span></div>
+      <div class="row"><span class="label">平台</span><span class="value">${esc(s.platform) || '—'}</span></div>
+      <div class="row"><span class="label">Load 1m</span><span class="value">${s.load1 || '—'}</span></div>
+      <div class="row"><span class="label">Load 5m</span><span class="value">${s.load5 || '—'}</span></div>
+      <div class="row"><span class="label">Load 15m</span><span class="value">${s.load15 || '—'}</span></div>
+      <div class="row"><span class="label">进程总数</span><span class="value">${s.processes || '—'}</span></div>
+      <div class="row"><span class="label">运行中进程</span><span class="value">${s.processesRunning || '—'}</span></div>
+      <div class="row"><span class="label">休眠进程</span><span class="value">${s.processesSleeping || '—'}</span></div>
+    </div>`;
+
+    $('grid').innerHTML = html;
+  }
+
+  async function load() {
+    try {
+      const r = await fetch('/api/stats/full', { headers: AUTH });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        $('error').textContent = '加载失败：' + (err.error || r.status);
+        return;
+      }
+      const data = await r.json();
+      $('error').textContent = '';
+      $('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString();
+      render(data);
+    } catch (e) {
+      $('error').textContent = '网络错误：' + e.message;
+    }
+  }
+
+  load();
+  setInterval(load, 3000);
+</script>
+</body>
+</html>
